@@ -89,15 +89,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let sessionLine = NSMenuItem(title: "Session (5h): …", action: nil, keyEquivalent: "")
     let statusLine = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
     let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
+    let autoResetItem = NSMenuItem(title: "Automatic (from Claude)", action: #selector(useAutoReset), keyEquivalent: "")
+    let customResetItem = NSMenuItem(title: "Custom…", action: #selector(setCustomReset), keyEquivalent: "")
 
     var budgetLeft: Double?
-    var weeklyReset: Date?
     var lastError: String?
+
+    // MARK: Reset-time settings (persisted)
+    let defaults = UserDefaults.standard
+    let week: TimeInterval = 7 * 24 * 3600
+
+    /// Last reset time reported by the API; persisted so it survives restarts and missing values.
+    var detectedReset: Date? {
+        get { defaults.object(forKey: "detectedReset") as? Date }
+        set { defaults.set(newValue, forKey: "detectedReset") }
+    }
+    var customMode: Bool {
+        get { defaults.bool(forKey: "customMode") }
+        set { defaults.set(newValue, forKey: "customMode") }
+    }
+    /// Calendar weekday: 1 = Sunday … 7 = Saturday.
+    var customWeekday: Int {
+        get { defaults.object(forKey: "customWeekday") as? Int ?? 7 }
+        set { defaults.set(newValue, forKey: "customWeekday") }
+    }
+    var customHour: Int {
+        get { defaults.object(forKey: "customHour") as? Int ?? 17 }
+        set { defaults.set(newValue, forKey: "customHour") }
+    }
+    var customMinute: Int {
+        get { defaults.object(forKey: "customMinute") as? Int ?? 0 }
+        set { defaults.set(newValue, forKey: "customMinute") }
+    }
+
+    /// The reset time actually used: custom, or the detected one rolled forward past "now".
+    var effectiveReset: Date? {
+        if customMode {
+            let c = DateComponents(hour: customHour, minute: customMinute, weekday: customWeekday)
+            return Calendar.current.nextDate(after: Date(), matching: c, matchingPolicy: .nextTime)
+        }
+        guard var r = detectedReset else { return nil }
+        while r <= Date() { r += week }
+        return r
+    }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         for i in [budgetLine, weekLine, sessionLine, statusLine] { i.isEnabled = false; menu.addItem(i) }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Refresh", action: #selector(refresh), keyEquivalent: "r"))
+        let resetMenu = NSMenu()
+        for i in [autoResetItem, customResetItem] { i.target = self; resetMenu.addItem(i) }
+        let resetParent = NSMenuItem(title: "Week Reset Time", action: nil, keyEquivalent: "")
+        resetParent.submenu = resetMenu
+        menu.addItem(resetParent)
         loginItem.target = self
         menu.addItem(loginItem)
         menu.addItem(.separator())
@@ -113,8 +157,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     var weekLeft: Double? {
-        guard let reset = weeklyReset else { return nil }
-        let pct = reset.timeIntervalSinceNow / (7 * 24 * 3600) * 100
+        guard let reset = effectiveReset else { return nil }
+        let pct = reset.timeIntervalSinceNow / week * 100
         return min(100, max(0, pct))
     }
 
@@ -123,7 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let u = try await fetchUsage()
                 budgetLeft = u.seven_day?.utilization.map { max(0, 100 - $0) }
-                if let r = parseDate(u.seven_day?.resets_at) { weeklyReset = r }
+                if let r = parseDate(u.seven_day?.resets_at) { detectedReset = r }
                 let df = DateFormatter(); df.dateFormat = "EEE HH:mm"
                 if let s = u.five_hour, let used = s.utilization {
                     let reset = parseDate(s.resets_at).map { " — resets \(df.string(from: $0))" } ?? ""
@@ -156,10 +200,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.toolTip = "✳︎ weekly Claude budget left · ◷ week left until reset"
 
         if let bl = budgetLeft { budgetLine.title = String(format: "Weekly budget left: %.0f%% (%.0f%% used)", bl, 100 - bl) }
-        if let r = weeklyReset, let wl = weekLeft {
+        if let r = effectiveReset, let wl = weekLeft {
             let df = DateFormatter(); df.dateFormat = "EEE d MMM, HH:mm"
-            weekLine.title = String(format: "Week left: %.1f%%", wl) + " — resets \(df.string(from: r))"
+            let source = customMode ? "custom" : "auto"
+            weekLine.title = String(format: "Week left: %.1f%%", wl) + " — resets \(df.string(from: r)) (\(source))"
+        } else {
+            weekLine.title = "Week left: unknown — set a custom reset time"
         }
+
+        autoResetItem.state = customMode ? .off : .on
+        customResetItem.state = customMode ? .on : .off
+        let df = DateFormatter(); df.dateFormat = "EEE HH:mm"
+        let c = DateComponents(hour: customHour, minute: customMinute, weekday: customWeekday)
+        let sample = Calendar.current.nextDate(after: Date(), matching: c, matchingPolicy: .nextTime)
+        customResetItem.title = customMode ? "Custom: \(sample.map(df.string(from:)) ?? "")…" : "Custom…"
+    }
+
+    // MARK: Reset time selection
+    @objc func useAutoReset() {
+        customMode = false
+        render()
+    }
+
+    @objc func setCustomReset() {
+        // Prefill from the current custom value, or from the detected reset if there is none yet.
+        var weekday = customWeekday, hour = customHour, minute = customMinute
+        if defaults.object(forKey: "customWeekday") == nil, let r = effectiveReset {
+            let c = Calendar.current.dateComponents([.weekday, .hour, .minute], from: r)
+            weekday = c.weekday ?? weekday; hour = c.hour ?? hour; minute = c.minute ?? minute
+        }
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 32, width: 220, height: 26))
+        popup.addItems(withTitles: Calendar.current.weekdaySymbols)   // index 0 = Sunday
+        popup.selectItem(at: weekday - 1)
+        let picker = NSDatePicker(frame: NSRect(x: 0, y: 0, width: 120, height: 26))
+        picker.datePickerStyle = .textFieldAndStepper
+        picker.datePickerElements = .hourMinute
+        picker.dateValue = Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: Date()) ?? Date()
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 60))
+        box.addSubview(popup); box.addSubview(picker)
+
+        let alert = NSAlert()
+        alert.messageText = "Weekly reset time"
+        alert.informativeText = "Day and time (local) your Claude week resets. Tip: check claude.ai → Settings → Usage."
+        alert.accessoryView = box
+        alert.addButton(withTitle: "Use Custom Time")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let t = Calendar.current.dateComponents([.hour, .minute], from: picker.dateValue)
+        customWeekday = popup.indexOfSelectedItem + 1
+        customHour = t.hour ?? 17
+        customMinute = t.minute ?? 0
+        customMode = true
+        render()
     }
 
     // MARK: Launch at login

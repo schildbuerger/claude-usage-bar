@@ -20,7 +20,16 @@ Click the menu bar item to see details: % used, the exact reset time, your 5-hou
    - `seven_day.utilization`: % of the weekly budget used, so the app shows 100 − this
    - `seven_day.resets_at`: when the weekly budget resets
    - `five_hour`: your current session window (shown in the menu)
-3. Week left = time until `resets_at` ÷ 7 days. This number updates every minute.
+3. Week left = time until the reset ÷ 7 days. This number updates every minute.
+
+### Reset time: automatic or custom
+
+Each account has its own weekly reset time. Under **Week Reset Time** in the menu you can choose:
+
+- **Automatic (from Claude)** (default): uses `resets_at` from the API. The app remembers the last value it saw and moves it forward by 7 days once it has passed, so the number stays right offline, right after a reset, and in weeks when the API sends no reset time.
+- **Custom…**: pick a weekday and time yourself (local time), e.g. Saturday 17:00. Useful if the automatic value is missing or wrong. You can find your reset time at claude.ai → Settings → Usage.
+
+The menu shows which source is in use, e.g. `resets Sat 21 Nov, 17:00 (auto)`.
 
 The token is sent only to `api.anthropic.com`. The app doesn't store anything or send data anywhere else. It is a single Swift file ([main.swift](main.swift)) with no dependencies.
 
